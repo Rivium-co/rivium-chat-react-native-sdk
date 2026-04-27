@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@rivium/react-native-chat": "^1.0.0",
+    "@rivium/react-native-chat": ">=0.1.0",
     "react": ">=18.0.0",
     "react-native": ">=0.72.0"
   },
@@ -35,8 +35,14 @@
     "components"
   ],
   "license": "MIT",
+  "author": "Rivium <support@rivium.co>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rivium/rivium-sdk"
-  }
+    "url": "git+https://github.com/Rivium-co/rivium-chat-react-native-sdk.git",
+    "directory": "rivium-chat-ui"
+  },
+  "bugs": {
+    "url": "https://github.com/Rivium-co/rivium-chat-react-native-sdk/issues"
+  },
+  "homepage": "https://rivium.co/cloud/rivium-chat"
 }
