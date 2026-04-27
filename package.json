@@ -1,0 +1,66 @@
+{
+  "name": "@rivium/react-native-chat",
+  "version": "0.1.0",
+  "description": "RiviumChat SDK for React Native - Headless chat-as-a-service",
+  "main": "lib/commonjs/index.js",
+  "module": "lib/module/index.js",
+  "types": "lib/typescript/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "lib"
+  ],
+  "scripts": {
+    "build": "bob build",
+    "typescript": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "clean": "rm -rf lib"
+  },
+  "keywords": [
+    "react-native",
+    "chat",
+    "messaging",
+    "sdk",
+    "rivium-chat",
+    "centrifugo",
+    "realtime"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rivium-co/rivium-chat-react-native-sdk.git"
+  },
+  "author": "Rivium <support@rivium.co>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Rivium-co/rivium-chat-react-native-sdk/issues"
+  },
+  "homepage": "https://rivium.co/cloud/rivium-chat",
+  "peerDependencies": {
+    "react": ">=17.0.0",
+    "react-native": ">=0.68.0"
+  },
+  "dependencies": {
+    "centrifuge": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-native": "^0.72.0",
+    "react-native-builder-bob": "^0.23.0",
+    "typescript": "^5.0.0"
+  },
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      "commonjs",
+      "module",
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ]
+    ]
+  }
+}

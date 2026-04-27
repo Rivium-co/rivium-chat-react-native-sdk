@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build
+lib/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# React Native
+*.jsbundle
+**/ios/Pods/
+**/ios/Podfile.lock
+**/ios/build/
+**/ios/*.xcworkspace/
+**/android/build/
+**/android/app/build/
+**/android/app/.cxx/
+**/android/.gradle/
+**/android/local.properties
+**/android/com/
+
+# Credentials
+*.env
+*.p8
+*.p12
+*.pem
+*.keystore
+
+# Logs
+*.log
+npm-debug.log*
+
+# Lock files
+package-lock.json
+
+# Claude
+.claude/

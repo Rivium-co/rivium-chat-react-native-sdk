@@ -1,0 +1,36 @@
+{
+  "name": "rivium-chat-ecommerce-example",
+  "version": "1.0.0",
+  "description": "RiviumChat E-commerce Example for React Native",
+  "main": "index.js",
+  "scripts": {
+    "android": "react-native run-android",
+    "ios": "react-native run-ios",
+    "start": "react-native start",
+    "lint": "eslint .",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@react-navigation/native": "^6.1.18",
+    "@react-navigation/native-stack": "^6.11.0",
+    "@react-navigation/stack": "^6.4.1",
+    "@rivium/react-native-chat": "file:../",
+    "@rivium/react-native-chat-ui": "file:../rivium-chat-ui",
+    "centrifuge": "^5.5.3",
+    "date-fns": "^3.0.0",
+    "react": "18.3.1",
+    "react-native": "0.77.3",
+    "react-native-gesture-handler": "^2.31.1",
+    "react-native-safe-area-context": "~4.14.0",
+    "react-native-screens": "^3.37.0",
+    "rivium-push-react-native": "^0.1.2"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "^15.0.0",
+    "@react-native-community/cli-platform-android": "^15.0.0",
+    "@react-native-community/cli-platform-ios": "^15.0.0",
+    "@react-native/metro-config": "^0.85.2",
+    "@types/react": "^18.2.0",
+    "typescript": "^5.3.0"
+  }
+}
