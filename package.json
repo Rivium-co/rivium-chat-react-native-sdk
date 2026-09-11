@@ -1,6 +1,6 @@
 {
   "name": "@rivium/react-native-chat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "RiviumChat SDK for React Native - Headless chat-as-a-service",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
@@ -15,7 +15,8 @@
     "build": "bob build",
     "typescript": "tsc --noEmit",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
-    "clean": "rm -rf lib"
+    "clean": "rm -rf lib",
+    "test": "vitest run"
   },
   "keywords": [
     "react-native",
@@ -47,7 +48,8 @@
     "@types/react": "^18.2.0",
     "@types/react-native": "^0.72.0",
     "react-native-builder-bob": "^0.23.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^1.6.1"
   },
   "react-native-builder-bob": {
     "source": "src",

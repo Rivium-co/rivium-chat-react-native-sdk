@@ -86,6 +86,20 @@ export interface RoomUpdatedEvent {
   isActive?: boolean;
 }
 
+/**
+ * The server refused the user's identity and a token refresh cannot fix it:
+ * the token was revoked or invalid, the project requires a token, or your
+ * tokenProvider failed. Typically: send the user to login.
+ *
+ * `code`: `token_revoked`, `token_invalid`, `token_required`, `token_expired`
+ * (after a failed refresh) or `token_provider_failed`.
+ */
+export interface AuthErrorEvent {
+  code: string;
+  message: string;
+  error?: unknown;
+}
+
 /** Map of all event types and their payloads. */
 export interface RiviumChatEventMap {
   message: MessageEvent;
@@ -100,4 +114,5 @@ export interface RiviumChatEventMap {
   subscriptionState: SubscriptionStateEvent;
   recoveryFailed: RecoveryFailedEvent;
   roomUpdated: RoomUpdatedEvent;
+  authError: AuthErrorEvent;
 }
