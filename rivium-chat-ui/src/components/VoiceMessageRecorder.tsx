@@ -6,7 +6,6 @@ import {
   StyleSheet,
   Animated,
   PanResponder,
-  Platform,
 } from 'react-native';
 import { useRiviumChatTheme } from '../theme/RiviumChatTheme';
 
@@ -23,12 +22,33 @@ export interface VoiceMessageRecorderProps {
   sendIcon?: string;
   /** Custom delete icon. */
   deleteIcon?: string;
+  /**
+   * Records the audio (see `VoiceAudioRecorder`). Without it the recorder only
+   * shows the UI and reports a placeholder URI.
+   */
+  audioRecorder?: VoiceAudioRecorder;
+  /** Called when the recorder cannot start or stop (for example: no microphone permission). */
+  onError?: (error: unknown) => void;
+}
+
+/**
+ * Records audio for `VoiceMessageRecorder`. React Native has no built-in
+ * audio recording: implement this with the recording library your app uses.
+ */
+export interface VoiceAudioRecorder {
+  /** Start recording (ask for the microphone permission here if needed). */
+  start(): void | Promise<void>;
+  /** Stop recording and return the recorded file's URI. */
+  stop(): string | Promise<string>;
+  /** Stop recording and throw the recording away. */
+  cancel(): void | Promise<void>;
 }
 
 /**
  * A voice message recorder with hold-to-record and slide-to-cancel.
- * Note: This component provides the UI - you need to integrate with
- * a native audio recording module (e.g., react-native-audio-recorder-player).
+ * Note: React Native has no built-in audio recording. Pass `audioRecorder`
+ * (a `VoiceAudioRecorder` built on the recording library your app uses) to
+ * record real audio; without it this component provides only the UI.
  */
 export function VoiceMessageRecorder({
   onRecordingComplete,
@@ -37,6 +57,8 @@ export function VoiceMessageRecorder({
   micIcon = '🎤',
   sendIcon = '➤',
   deleteIcon = '🗑️',
+  audioRecorder,
+  onError,
 }: VoiceMessageRecorderProps) {
   const { colors } = useRiviumChatTheme();
   const [isRecording, setIsRecording] = useState(false);
@@ -46,12 +68,84 @@ export function VoiceMessageRecorder({
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const slideX = useRef(new Animated.Value(0)).current;
   const durationInterval = useRef<NodeJS.Timeout | null>(null);
+  // Refs, not state: the pan responder is created once and the timer runs
+  // later, so both must see the current recording, duration and callbacks.
+  const isRecordingRef = useRef(false);
+  const startedAtRef = useRef(0);
+  const onRecordingCompleteRef = useRef(onRecordingComplete);
+  const onCancelRef = useRef(onCancel);
+  onRecordingCompleteRef.current = onRecordingComplete;
+  onCancelRef.current = onCancel;
+  const audioRecorderRef = useRef(audioRecorder);
+  const onErrorRef = useRef(onError);
+  audioRecorderRef.current = audioRecorder;
+  onErrorRef.current = onError;
+
+  const fail = (error: unknown) => {
+    isRecordingRef.current = false;
+    setIsRecording(false);
+    setDuration(0);
+    onErrorRef.current?.(error);
+  };
+
+  const elapsed = () => Math.min(Date.now() - startedAtRef.current, maxDuration);
+
+  const startRecording = () => {
+    if (isRecordingRef.current) return;
+    isRecordingRef.current = true;
+    startedAtRef.current = Date.now();
+    setIsRecording(true);
+    setDuration(0);
+    const recorder = audioRecorderRef.current;
+    if (!recorder) return;
+    try {
+      Promise.resolve(recorder.start()).catch(fail);
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  const stopRecording = () => {
+    if (!isRecordingRef.current) return;
+    isRecordingRef.current = false;
+    const durationMs = elapsed();
+    setIsRecording(false);
+    const recorder = audioRecorderRef.current;
+    if (!recorder) {
+      // No recorder given: the UI only, with a placeholder file.
+      onRecordingCompleteRef.current('file://placeholder-recording.m4a', durationMs);
+      return;
+    }
+    try {
+      Promise.resolve(recorder.stop())
+        .then((uri) => onRecordingCompleteRef.current(uri, durationMs))
+        .catch(fail);
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  const cancelRecording = () => {
+    isRecordingRef.current = false;
+    setIsRecording(false);
+    setDuration(0);
+    setSlideToCancel(false);
+    onCancelRef.current?.();
+    try {
+      Promise.resolve(audioRecorderRef.current?.cancel()).catch(() => {});
+    } catch {
+      // ignore: the recording is thrown away either way
+    }
+  };
+
+  const handlersRef = useRef({ startRecording, stopRecording, cancelRecording });
+  handlersRef.current = { startRecording, stopRecording, cancelRecording };
 
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
-        startRecording();
+        handlersRef.current.startRecording();
       },
       onPanResponderMove: (_, gestureState) => {
         const dx = Math.min(0, gestureState.dx);
@@ -60,9 +154,9 @@ export function VoiceMessageRecorder({
       },
       onPanResponderRelease: (_, gestureState) => {
         if (gestureState.dx < -100) {
-          cancelRecording();
+          handlersRef.current.cancelRecording();
         } else {
-          stopRecording();
+          handlersRef.current.stopRecording();
         }
         Animated.spring(slideX, {
           toValue: 0,
@@ -92,13 +186,11 @@ export function VoiceMessageRecorder({
 
       // Start duration timer
       durationInterval.current = setInterval(() => {
-        setDuration((prev) => {
-          const next = prev + 100;
-          if (next >= maxDuration) {
-            stopRecording();
-          }
-          return next;
-        });
+        const next = elapsed();
+        setDuration(next);
+        if (next >= maxDuration) {
+          handlersRef.current.stopRecording();
+        }
       }, 100);
     } else {
       pulseAnim.stopAnimation();
@@ -115,29 +207,6 @@ export function VoiceMessageRecorder({
       }
     };
   }, [isRecording, maxDuration]);
-
-  const startRecording = () => {
-    setIsRecording(true);
-    setDuration(0);
-    // TODO: Start actual audio recording using native module
-  };
-
-  const stopRecording = () => {
-    if (isRecording) {
-      setIsRecording(false);
-      // TODO: Stop actual recording and get file URI
-      // For now, simulate with a placeholder
-      onRecordingComplete('file://placeholder-recording.m4a', duration);
-    }
-  };
-
-  const cancelRecording = () => {
-    setIsRecording(false);
-    setDuration(0);
-    setSlideToCancel(false);
-    onCancel?.();
-    // TODO: Cancel actual recording
-  };
 
   const formatDuration = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
@@ -194,6 +263,20 @@ export function VoiceMessageRecorder({
 }
 
 /**
+ * Plays audio for `VoiceMessagePlayer`. React Native has no built-in audio
+ * playback: implement this with the audio library your app uses.
+ */
+export interface VoiceAudioPlayer {
+  /** Start or resume playing `uri`; report the position while playing and call `onEnd` when done. */
+  play(
+    uri: string,
+    callbacks: { onProgress: (positionMs: number, durationMs: number) => void; onEnd: () => void }
+  ): void | Promise<void>;
+  /** Pause playback. */
+  pause(): void | Promise<void>;
+}
+
+/**
  * Voice message playback component.
  */
 export interface VoiceMessagePlayerProps {
@@ -205,6 +288,8 @@ export interface VoiceMessagePlayerProps {
   isMe?: boolean;
   /** Called when playback state changes. */
   onPlaybackStateChange?: (isPlaying: boolean) => void;
+  /** Plays the audio (see `VoiceAudioPlayer`). Without it the button only reports play / pause. */
+  audioPlayer?: VoiceAudioPlayer;
 }
 
 export function VoiceMessagePlayer({
@@ -212,16 +297,64 @@ export function VoiceMessagePlayer({
   durationMs,
   isMe = false,
   onPlaybackStateChange,
+  audioPlayer,
 }: VoiceMessagePlayerProps) {
   const { colors } = useRiviumChatTheme();
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [positionMs, setPositionMs] = useState(0);
+  const isPlayingRef = useRef(false);
+  const audioPlayerRef = useRef(audioPlayer);
+  audioPlayerRef.current = audioPlayer;
+  // Fixed bar heights: random ones would jump on every progress update.
+  const bars = useRef(Array.from({ length: 20 }, () => 8 + Math.random() * 16)).current;
+
+  const setPlaying = (playing: boolean) => {
+    isPlayingRef.current = playing;
+    setIsPlaying(playing);
+    onPlaybackStateChange?.(playing);
+  };
+
+  // Stop playing when the message leaves the screen
+  useEffect(() => {
+    return () => {
+      if (isPlayingRef.current) {
+        try {
+          audioPlayerRef.current?.pause();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
 
   const togglePlayback = () => {
-    const newState = !isPlaying;
-    setIsPlaying(newState);
-    onPlaybackStateChange?.(newState);
-    // TODO: Implement actual audio playback
+    if (isPlaying) {
+      audioPlayer?.pause();
+      setPlaying(false);
+      return;
+    }
+    setPlaying(true);
+    if (!audioPlayer) return;
+    try {
+      const started = audioPlayer.play(uri, {
+        onProgress: (position, total) => {
+          const length = total > 0 ? total : durationMs;
+          setPositionMs(position);
+          setProgress(length > 0 ? Math.min(1, position / length) : 0);
+        },
+        onEnd: () => {
+          setPositionMs(0);
+          setProgress(0);
+          setPlaying(false);
+        },
+      });
+      if (started && typeof (started as Promise<void>).catch === 'function') {
+        (started as Promise<void>).catch(() => setPlaying(false));
+      }
+    } catch {
+      setPlaying(false);
+    }
   };
 
   const formatDuration = (ms: number) => {
@@ -231,6 +364,8 @@ export function VoiceMessagePlayer({
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
+  const shownMs = isPlaying || positionMs > 0 ? positionMs : durationMs;
+
   return (
     <View style={[styles.playerContainer]}>
       <TouchableOpacity
@@ -239,23 +374,27 @@ export function VoiceMessagePlayer({
           { backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : `${colors.linkText}20` },
         ]}
         onPress={togglePlayback}
+        accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
       >
         <Text style={[styles.playIcon, { color: isMe ? '#fff' : colors.linkText }]}>
           {isPlaying ? '⏸' : '▶'}
         </Text>
       </TouchableOpacity>
 
-      <View style={styles.waveformContainer}>
+      <View
+        style={styles.waveformContainer}
+        accessibilityLabel={`Played ${Math.round(progress * 100)}%`}
+      >
         {/* Simplified waveform visualization */}
-        {Array.from({ length: 20 }).map((_, i) => (
+        {bars.map((height, i) => (
           <View
             key={i}
             style={[
               styles.waveformBar,
               {
-                height: 8 + Math.random() * 16,
+                height,
                 backgroundColor:
-                  i / 20 < progress
+                  i / bars.length < progress
                     ? colors.linkText
                     : isMe
                     ? 'rgba(255,255,255,0.3)'
@@ -272,7 +411,7 @@ export function VoiceMessagePlayer({
           { color: isMe ? 'rgba(255,255,255,0.7)' : colors.timestampText },
         ]}
       >
-        {formatDuration(durationMs)}
+        {formatDuration(shownMs)}
       </Text>
     </View>
   );

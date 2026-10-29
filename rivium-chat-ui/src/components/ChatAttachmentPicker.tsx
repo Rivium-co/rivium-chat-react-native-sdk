@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -19,8 +19,12 @@ export interface AttachmentOption {
   label: string;
   /** Icon (emoji or text). */
   icon: string;
-  /** Called when this option is selected. */
-  onPress: () => void;
+  /**
+   * Called when this option is selected. Pass the files your picker returned
+   * to `addAttachments`: the picker checks them against `maxAttachments`,
+   * `maxFileSize` and `allowedTypes` before adding them.
+   */
+  onPress: (addAttachments?: (attachments: SelectedAttachment[]) => void) => void;
 }
 
 export interface SelectedAttachment {
@@ -51,8 +55,26 @@ export interface ChatAttachmentPickerProps {
   maxAttachments?: number;
   /** Maximum file size in bytes. */
   maxFileSize?: number;
-  /** Allowed file types (MIME types). */
+  /** Allowed file types (MIME types). A wildcard such as `image/*` allows a whole group. */
   allowedTypes?: string[];
+  /** Called with the message shown when a file is refused. */
+  onError?: (message: string) => void;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Whether `mimeType` matches one of `allowed` (exact, or `type/*`). */
+function isTypeAllowed(mimeType: string | undefined, allowed: string[]): boolean {
+  if (!mimeType) return false;
+  const type = mimeType.toLowerCase();
+  return allowed.some((entry) => {
+    const rule = entry.toLowerCase();
+    return rule.endsWith('/*') ? type.startsWith(rule.slice(0, -1)) : type === rule;
+  });
 }
 
 const DEFAULT_OPTIONS: AttachmentOption[] = [
@@ -84,9 +106,13 @@ const DEFAULT_OPTIONS: AttachmentOption[] = [
 
 /**
  * An attachment picker for selecting files, images, and other media.
- * Note: This component provides the UI - you need to integrate with
- * native modules for actual file picking (e.g., react-native-image-picker,
- * react-native-document-picker).
+ *
+ * React Native has no built-in file picking, and this kit adds no native
+ * dependency. Pass `options` that open the pickers your app uses and hand
+ * the picked files to `addAttachments` (the argument of each option's
+ * `onPress`); the picker checks them against `maxAttachments`,
+ * `maxFileSize` and `allowedTypes`. The built-in options (Camera, Gallery,
+ * Document, Location) are placeholders and do nothing.
  */
 export function ChatAttachmentPicker({
   visible,
@@ -96,14 +122,45 @@ export function ChatAttachmentPicker({
   maxAttachments = 10,
   maxFileSize = 25 * 1024 * 1024, // 25MB
   allowedTypes,
+  onError,
 }: ChatAttachmentPickerProps) {
   const { colors } = useRiviumChatTheme();
   const [selectedAttachments, setSelectedAttachments] = useState<SelectedAttachment[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  const attachmentOptions = options || DEFAULT_OPTIONS.map((opt) => ({
+  // The current selection, for pickers that call addAttachments later (async).
+  const selectedRef = useRef(selectedAttachments);
+  selectedRef.current = selectedAttachments;
+
+  /** Adds picked files, refusing those over the limits (the user is told why). */
+  const addAttachments = (picked: SelectedAttachment[]) => {
+    let refusal: string | null = null;
+    const next = [...selectedRef.current];
+    for (const attachment of picked) {
+      if (next.length >= maxAttachments) {
+        refusal = `You can add at most ${maxAttachments} attachment${maxAttachments === 1 ? '' : 's'}`;
+        break;
+      }
+      if (attachment.size !== undefined && attachment.size > maxFileSize) {
+        refusal = `"${attachment.name}" is larger than the maximum of ${formatBytes(maxFileSize)}`;
+        continue;
+      }
+      if (allowedTypes && allowedTypes.length > 0 && !isTypeAllowed(attachment.mimeType, allowedTypes)) {
+        refusal = `"${attachment.name}": this file type is not allowed`;
+        continue;
+      }
+      next.push(attachment);
+    }
+    selectedRef.current = next;
+    setSelectedAttachments(next);
+    setError(refusal);
+    if (refusal) onError?.(refusal);
+  };
+
+  const attachmentOptions = (options || DEFAULT_OPTIONS.map((opt) => ({
     ...opt,
     onPress: () => handleOptionPress(opt.id),
-  }));
+  }))).map((opt) => ({ ...opt, onPress: () => opt.onPress(addAttachments) }));
 
   const handleOptionPress = (optionId: string) => {
     // Placeholder - integrate with native pickers
@@ -121,6 +178,7 @@ export function ChatAttachmentPicker({
 
   const handleRemoveAttachment = (id: string) => {
     setSelectedAttachments(selectedAttachments.filter((a) => a.id !== id));
+    setError(null);
   };
 
   const handleSend = () => {
@@ -128,6 +186,7 @@ export function ChatAttachmentPicker({
       onAttachmentsSelected(selectedAttachments);
       setSelectedAttachments([]);
     }
+    setError(null);
     onClose();
   };
 
@@ -170,6 +229,12 @@ export function ChatAttachmentPicker({
               </TouchableOpacity>
             ))}
           </View>
+
+          {error && (
+            <View style={[styles.errorBox, { backgroundColor: `${colors.failedMessage}15` }]}>
+              <Text style={[styles.errorText, { color: colors.failedMessage }]}>{error}</Text>
+            </View>
+          )}
 
           {/* Selected attachments preview */}
           {selectedAttachments.length > 0 && (
@@ -340,6 +405,16 @@ const styles = StyleSheet.create({
     borderTopColor: 'rgba(0, 0, 0, 0.1)',
     paddingTop: 16,
     paddingHorizontal: 16,
+  },
+  errorBox: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginTop: 16,
+    borderRadius: 8,
+  },
+  errorText: {
+    fontSize: 12,
+    textAlign: 'center',
   },
   selectedTitle: {
     fontSize: 12,

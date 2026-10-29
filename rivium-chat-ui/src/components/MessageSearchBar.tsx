@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { format } from 'date-fns';
 import {
   View,
   Text,
@@ -8,6 +9,7 @@ import {
   Animated,
   Keyboard,
   ActivityIndicator,
+  ScrollView,
 } from 'react-native';
 import { useRiviumChatTheme } from '../theme/RiviumChatTheme';
 
@@ -56,7 +58,7 @@ export function MessageSearchBar({
   onClose,
   results = [],
   currentIndex = 0,
-  totalResults = 0,
+  totalResults: totalResultsProp,
   isLoading = false,
   placeholder = 'Search messages...',
   onPrevious,
@@ -64,6 +66,7 @@ export function MessageSearchBar({
 }: MessageSearchBarProps) {
   const { colors } = useRiviumChatTheme();
   const [query, setQuery] = useState('');
+  const totalResults = totalResultsProp ?? results.length;
   const inputRef = useRef<TextInput>(null);
   const slideAnim = useRef(new Animated.Value(-60)).current;
 
@@ -191,6 +194,40 @@ export function MessageSearchBar({
           )}
         </View>
       )}
+
+      {/* Results */}
+      {query.length > 0 && !isLoading && results.length > 0 && (
+        <ScrollView style={styles.resultsList} keyboardShouldPersistTaps="handled">
+          {results.map((result, index) => (
+            <TouchableOpacity
+              key={result.messageId}
+              onPress={() => onResultSelected?.(result)}
+              style={[
+                styles.resultItem,
+                index === currentIndex && { backgroundColor: `${colors.linkText}15` },
+              ]}
+            >
+              <View style={styles.resultHeader}>
+                {result.senderName ? (
+                  <Text style={[styles.resultSender, { color: colors.otherMessageText }]} numberOfLines={1}>
+                    {result.senderName}
+                  </Text>
+                ) : (
+                  <View />
+                )}
+                <Text style={[styles.resultTime, { color: colors.timestampText }]}>
+                  {format(result.timestamp, 'MMM d, HH:mm')}
+                </Text>
+              </View>
+              <HighlightedText
+                text={result.content}
+                query={query}
+                style={[styles.resultContent, { color: colors.otherMessageText }]}
+              />
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
     </Animated.View>
   );
 }
@@ -221,7 +258,9 @@ export function HighlightedText({
     return <Text style={style}>{text}</Text>;
   }
 
-  const parts = text.split(new RegExp(`(${query})`, 'gi'));
+  // The query is plain text: escape it so characters like ( or * are matched literally.
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
 
   return (
     <Text style={style}>
@@ -245,6 +284,32 @@ export function HighlightedText({
 }
 
 const styles = StyleSheet.create({
+  resultsList: {
+    maxHeight: 240,
+    marginTop: 8,
+  },
+  resultItem: {
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+  },
+  resultHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 2,
+  },
+  resultSender: {
+    fontSize: 13,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
+  resultTime: {
+    fontSize: 11,
+    marginLeft: 8,
+  },
+  resultContent: {
+    fontSize: 14,
+  },
   container: {
     paddingHorizontal: 12,
     paddingVertical: 8,

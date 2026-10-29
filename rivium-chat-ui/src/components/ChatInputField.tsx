@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Keyboard,
 } from 'react-native';
 import { useRiviumChatTheme } from '../theme/RiviumChatTheme';
 import { Message } from '../state/RiviumChatProvider';
@@ -22,6 +21,8 @@ export interface ChatInputFieldProps {
   onEmojiPress?: () => void;
   disabled?: boolean;
   placeholder?: string;
+  /** Names to show instead of user ids (for "Replying to ..."). */
+  userDisplayNames?: Record<string, string>;
 }
 
 export function ChatInputField({
@@ -36,6 +37,7 @@ export function ChatInputField({
   onEmojiPress,
   disabled = false,
   placeholder = 'Type a message...',
+  userDisplayNames = {},
 }: ChatInputFieldProps) {
   const [text, setText] = useState('');
   const inputRef = useRef<TextInput>(null);
@@ -92,7 +94,7 @@ export function ChatInputField({
           <View style={[styles.previewAccent, { backgroundColor: colors.linkText }]} />
           <View style={styles.previewContent}>
             <Text style={[styles.previewLabel, { color: colors.linkText }]}>
-              Replying to {replyingTo.senderUserId}
+              Replying to {userDisplayNames[replyingTo.senderUserId] || replyingTo.senderUserId}
             </Text>
             <Text style={styles.previewText} numberOfLines={1}>
               {replyingTo.content}
@@ -145,6 +147,18 @@ export function ChatInputField({
             },
           ]}
         >
+          {/* Emoji button */}
+          {onEmojiPress && !isEditing && (
+            <TouchableOpacity
+              onPress={onEmojiPress}
+              disabled={disabled}
+              accessibilityLabel="Emoji"
+              style={styles.emojiButton}
+            >
+              <Text style={[styles.iconText, disabled && styles.disabled]}>😊</Text>
+            </TouchableOpacity>
+          )}
+
           <TextInput
             ref={inputRef}
             value={text}
@@ -182,6 +196,10 @@ export function ChatInputField({
 }
 
 const styles = StyleSheet.create({
+  emojiButton: {
+    marginRight: 6,
+    justifyContent: 'center',
+  },
   container: {
     borderTopWidth: 1,
     borderTopColor: '#E5E5EA',

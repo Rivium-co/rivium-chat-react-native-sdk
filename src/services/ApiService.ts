@@ -26,9 +26,22 @@ import type {
 /** Result from a message search operation. */
 export interface SearchResult {
   messages: Message[];
+  /** Number of messages that match the query. */
+  total: number;
+  /** @deprecated Use `total`. Same value. */
   totalCount: number;
+  /** @deprecated Compare `offset + messages.length` with `total`. */
   hasMore: boolean;
 }
+
+/** Message thrown by `uploadFile()`, which the API does not offer. */
+export const UPLOAD_NOT_SUPPORTED =
+  'uploadFile() is not supported: Rivium Chat does not store files. Upload the file to your own storage ' +
+  'and send its URL as an attachment with sendMessage().';
+/** Message thrown by `updateRoom()`, which the API does not offer. */
+export const UPDATE_ROOM_NOT_SUPPORTED =
+  'updateRoom() is not supported: rooms cannot be changed from the client SDK. ' +
+  'Set the name and metadata when you create the room.';
 
 /** Result from a file upload operation. */
 export interface UploadResult {
@@ -43,7 +56,13 @@ export interface Mention {
   id: string;
   messageId: string;
   roomId: string;
+  /** The user who was mentioned. */
+  mentionedUserId: string;
+  /** When the mention was made (ISO 8601). */
+  createdAt: string;
+  /** @deprecated Use `mentionedUserId`. Same value. */
   userId: string;
+  /** @deprecated Use `createdAt`. Same value. */
   mentionedAt: string;
   message: Message;
 }
@@ -93,7 +112,7 @@ export class ApiService {
 
   /** Get a room by external ID. */
   async getRoomByExternalId(externalId: string): Promise<Room> {
-    return this.request<Room>('GET', `/rooms/external/${encodeURIComponent(externalId)}`);
+    return this.request<Room>('GET', `/rooms/by-external-id/${encodeURIComponent(externalId)}`);
   }
 
   /** Create a new room. */
@@ -102,27 +121,35 @@ export class ApiService {
     options?: {
       externalId?: string;
       metadata?: Record<string, unknown>;
-      participants?: Array<{ userId: string; role?: string }>;
+      participants?: Array<{ userId?: string; externalUserId?: string; role?: string; displayName?: string; locale?: string }>;
     }
   ): Promise<Room> {
     return this.request<Room>('POST', '/rooms', {
       name,
       externalId: options?.externalId,
       metadata: options?.metadata,
-      participants: options?.participants,
+      // The API names the user `externalUserId`; `userId` is accepted here for
+      // apps written against earlier releases.
+      participants: options?.participants?.map(({ userId, externalUserId, ...rest }) => ({
+        externalUserId: externalUserId ?? userId,
+        ...rest,
+      })),
     });
   }
 
-  /** Update a room. */
+  /**
+   * Not supported: the API has no route to change a room.
+   * @deprecated Always rejects with a `RiviumChatError`.
+   */
   async updateRoom(
-    roomId: string,
-    updates: {
+    _roomId: string,
+    _updates: {
       name?: string;
       metadata?: Record<string, unknown>;
       isActive?: boolean;
     }
   ): Promise<Room> {
-    return this.request<Room>('PATCH', `/rooms/${roomId}`, updates);
+    throw new RiviumChatError(UPDATE_ROOM_NOT_SUPPORTED);
   }
 
   /** Delete a room. */
@@ -137,7 +164,7 @@ export class ApiService {
     options?: { role?: string; displayName?: string }
   ): Promise<void> {
     await this.request('POST', `/rooms/${roomId}/participants`, {
-      userId,
+      externalUserId: userId,
       role: options?.role,
       displayName: options?.displayName,
     });
@@ -145,7 +172,7 @@ export class ApiService {
 
   /** Remove a participant from a room. */
   async removeParticipant(roomId: string, userId: string): Promise<void> {
-    await this.request('DELETE', `/rooms/${roomId}/participants/${userId}`);
+    await this.request('DELETE', `/rooms/${roomId}/participants/${encodeURIComponent(userId)}`);
   }
 
   // ─── Message Operations ──────────────────────────────────────────────
@@ -159,6 +186,8 @@ export class ApiService {
       attachments?: Attachment[];
       replyToId?: string;
       metadata?: Record<string, unknown>;
+      /** Sent only by the offline outbox (`queueOfflineMessages`). */
+      clientMessageId?: string;
     }
   ): Promise<Message> {
     return this.request<Message>('POST', `/rooms/${roomId}/messages`, {
@@ -168,6 +197,7 @@ export class ApiService {
       attachments: options?.attachments,
       replyToId: options?.replyToId,
       metadata: options?.metadata,
+      ...(options?.clientMessageId && { clientMessageId: options.clientMessageId }),
     });
   }
 
@@ -177,6 +207,7 @@ export class ApiService {
     options?: { limit?: number; before?: string }
   ): Promise<PaginatedMessages> {
     const qs = buildQueryString({
+      userId: this.config.userId,
       limit: String(options?.limit ?? 50),
       before: options?.before,
     });
@@ -186,25 +217,29 @@ export class ApiService {
     );
   }
 
-  /** Delete a message. */
-  async deleteMessage(roomId: string, messageId: string): Promise<void> {
-    await this.request('DELETE', `/rooms/${roomId}/messages/${messageId}`);
+  /** Delete a message. `roomId` is kept for compatibility; the message id is enough. */
+  async deleteMessage(_roomId: string, messageId: string): Promise<void> {
+    const qs = buildQueryString({ userId: this.config.userId });
+    await this.request('DELETE', `/messages/${messageId}${qs}`);
   }
 
-  /** Edit a message. */
-  async editMessage(roomId: string, messageId: string, content: string): Promise<Message> {
-    return this.request<Message>('PATCH', `/rooms/${roomId}/messages/${messageId}`, {
+  /** Edit a message. `roomId` is kept for compatibility; the message id is enough. */
+  async editMessage(_roomId: string, messageId: string, content: string): Promise<Message> {
+    return this.request<Message>('PUT', `/messages/${messageId}`, {
+      userId: this.config.userId,
       content,
     });
   }
 
   // ─── Read Status ─────────────────────────────────────────────────────
 
-  /** Mark messages as read up to a certain message. */
-  async markAsRead(roomId: string, messageId?: string): Promise<void> {
+  /**
+   * Mark all messages in a room as read. `messageId` is ignored: the API marks
+   * the whole room read.
+   */
+  async markAsRead(roomId: string, _messageId?: string): Promise<void> {
     await this.request('POST', `/rooms/${roomId}/read`, {
       userId: this.config.userId,
-      ...(messageId && { messageId }),
     });
   }
 
@@ -233,20 +268,20 @@ export class ApiService {
   }
 
   /** Get all reactions for a message. */
-  async getReactions(roomId: string, messageId: string): Promise<Reaction[]> {
-    return this.request<Reaction[]>('GET', `/rooms/${roomId}/messages/${messageId}/reactions`);
+  async getReactions(_roomId: string, messageId: string): Promise<Reaction[]> {
+    return this.request<Reaction[]>('GET', `/messages/${messageId}/reactions`);
   }
 
   // ─── Pinned Messages ───────────────────────────────────────────────────
 
-  /** Pin a message. */
-  async pinMessage(roomId: string, messageId: string): Promise<void> {
-    await this.request('POST', `/rooms/${roomId}/messages/${messageId}/pin`);
+  /** Pin a message. `roomId` is kept for compatibility; the message id is enough. */
+  async pinMessage(_roomId: string, messageId: string): Promise<void> {
+    await this.request('POST', `/messages/${messageId}/pin`, { userId: this.config.userId });
   }
 
-  /** Unpin a message. */
-  async unpinMessage(roomId: string, messageId: string): Promise<void> {
-    await this.request('DELETE', `/rooms/${roomId}/messages/${messageId}/pin`);
+  /** Unpin a message. `roomId` is kept for compatibility; the message id is enough. */
+  async unpinMessage(_roomId: string, messageId: string): Promise<void> {
+    await this.request('DELETE', `/messages/${messageId}/pin`, { userId: this.config.userId });
   }
 
   /** Get all pinned messages in a room. */
@@ -263,58 +298,66 @@ export class ApiService {
     options?: { limit?: number; offset?: number }
   ): Promise<SearchResult> {
     const qs = buildQueryString({
+      userId: this.config.userId,
       q: query,
       limit: options?.limit ? String(options.limit) : undefined,
       offset: options?.offset ? String(options.offset) : undefined,
     });
-    return this.request<SearchResult>('GET', `/rooms/${roomId}/messages/search${qs}`);
+    const result = await this.request<{ messages?: Message[]; total?: number }>(
+      'GET',
+      `/rooms/${roomId}/messages/search${qs}`
+    );
+    const messages = result?.messages ?? [];
+    const total = result?.total ?? messages.length;
+    return {
+      messages,
+      total,
+      totalCount: total,
+      hasMore: (options?.offset ?? 0) + messages.length < total,
+    };
   }
 
-  /** Get mentions for the current user in a room. */
+  /**
+   * Get mentions for the current user in a room, newest first. `before` is
+   * ignored: the API returns the latest `limit` mentions.
+   */
   async getMentions(roomId: string, options?: { limit?: number; before?: string }): Promise<Mention[]> {
     const qs = buildQueryString({
+      userId: this.config.userId,
       limit: options?.limit ? String(options.limit) : undefined,
-      before: options?.before,
     });
-    return this.request<Mention[]>('GET', `/rooms/${roomId}/mentions${qs}`);
+    const mentions = await this.request<Mention[]>('GET', `/rooms/${roomId}/mentions${qs}`);
+    // Older releases typed these fields; fill them from what the API sends.
+    return (mentions ?? []).map((m) => ({
+      ...m,
+      userId: m.userId ?? m.mentionedUserId,
+      mentionedAt: m.mentionedAt ?? m.createdAt,
+    }));
   }
 
   // ─── File Upload ───────────────────────────────────────────────────────
 
-  /** Upload a file attachment. */
-  async uploadFile(roomId: string, file: Blob | File, filename?: string): Promise<UploadResult> {
-    const formData = new FormData();
-    formData.append('file', file, filename);
-
-    const url = `${SDK_CONFIG.baseUrl}/rooms/${roomId}/upload`;
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'X-API-Key': this.config.apiKey,
-        'X-User-ID': this.config.userId,
-        [SDK_HEADER]: SDK_HEADER_VALUE,
-      },
-      body: formData,
-    });
-
-    if (!response.ok) {
-      const errorData = await response.text();
-      throw new RiviumChatError(
-        `HTTP error ${response.status}: ${response.statusText}`,
-        response.status,
-        errorData
-      );
-    }
-
-    return response.json();
+  /**
+   * Not supported: Rivium Chat does not store files. Upload the file to your
+   * own storage and send its URL as an attachment with `sendMessage()`.
+   * @deprecated Always rejects with a `RiviumChatError`.
+   */
+  async uploadFile(_roomId: string, _file: Blob | File, _filename?: string): Promise<UploadResult> {
+    throw new RiviumChatError(UPLOAD_NOT_SUPPORTED);
   }
 
   // ─── Typing Indicator ────────────────────────────────────────────────
 
-  /** Send typing indicator. */
-  async sendTypingIndicator(roomId: string, isTyping: boolean): Promise<void> {
-    await this.request('POST', `/rooms/${roomId}/typing`, { isTyping });
+  /**
+   * Not supported over HTTP: typing goes over the realtime connection. Use
+   * `RiviumChatClient.publishTyping()` or `RiviumChatClient.sendTypingIndicator()`.
+   * @deprecated Always rejects with a `RiviumChatError`.
+   */
+  async sendTypingIndicator(_roomId: string, _isTyping: boolean): Promise<void> {
+    throw new RiviumChatError(
+      'ApiService.sendTypingIndicator() is not supported: typing goes over the realtime connection. ' +
+        'Use RiviumChatClient.sendTypingIndicator().'
+    );
   }
 
   // ─── Presence ────────────────────────────────────────────────────────
@@ -363,7 +406,7 @@ export class ApiService {
       if (body && method !== 'GET') {
         options.body = JSON.stringify(body);
       }
-      return fetch(url, options);
+      return fetchWithTimeout(url, options, this.config.requestTimeoutMs);
     };
 
     let response: Response;
@@ -424,11 +467,46 @@ function parseMessage(text: string): string {
 export class RiviumChatError extends Error {
   public readonly statusCode?: number;
   public readonly responseData?: string;
+  /** Set when the request failed before an answer: `'timeout'`. */
+  public readonly code?: string;
 
-  constructor(message: string, statusCode?: number, responseData?: string) {
+  constructor(message: string, statusCode?: number, responseData?: string, code?: string) {
     super(message);
     this.name = 'RiviumChatError';
     this.statusCode = statusCode;
     this.responseData = responseData;
+    this.code = code;
+  }
+}
+
+/**
+ * fetch() that gives up after `timeoutMs`: the request is aborted and the
+ * promise rejects with a RiviumChatError (code `'timeout'`), also where
+ * fetch ignores the abort signal.
+ */
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
+  const timeoutError = new RiviumChatError(`Request timed out after ${timeoutMs / 1000} seconds`, undefined, undefined, 'timeout');
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // Reject first, then abort: a browser's fetch rejects with AbortError the moment it is aborted, and that must
+      // not win the race. The catch below maps any rejection after the timer fired to the timeout error too.
+      timedOut = true;
+      reject(timeoutError);
+      controller?.abort();
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      fetch(url, controller ? { ...options, signal: controller.signal } : options),
+      timeout,
+    ]);
+  } catch (error) {
+    if (timedOut) throw timeoutError;
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }

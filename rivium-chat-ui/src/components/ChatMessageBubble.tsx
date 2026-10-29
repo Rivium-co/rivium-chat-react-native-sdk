@@ -297,6 +297,16 @@ function StatusIndicator({
     );
   }
 
+  if (message.isPending && message.isQueued) {
+    // Queued in the client's offline outbox: sent when the network is back
+    return (
+      <View style={styles.statusRow} accessibilityRole="text" accessibilityLabel="Waiting for network…">
+        <Text style={[styles.statusIcon, { color: `${colors.myMessageText}b3` }]}>⏱</Text>
+        <Text style={[styles.waitingText, { color: `${colors.myMessageText}b3` }]}>Waiting for network…</Text>
+      </View>
+    );
+  }
+
   if (message.isPending) {
     return <Text style={[styles.statusIcon, { color: `${colors.myMessageText}b3` }]}>⏱</Text>;
   }
@@ -430,6 +440,10 @@ const styles = StyleSheet.create({
   },
   statusIcon: {
     fontSize: 10,
+    marginLeft: 4,
+  },
+  waitingText: {
+    fontSize: 11,
     marginLeft: 4,
   },
   retryText: {

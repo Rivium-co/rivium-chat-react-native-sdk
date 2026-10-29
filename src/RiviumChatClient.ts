@@ -2,6 +2,7 @@ import { type RiviumChatConfig, type NormalizedConfig, normalizeConfig } from '.
 import { ApiService, type Mention, type SearchResult, type UploadResult } from './services/ApiService';
 import { RealtimeService } from './services/RealtimeService';
 import { TokenManager } from './services/TokenManager';
+import { Outbox, isTransientSendError, pendingMessage, uuidV4, type PendingMessage } from './services/Outbox';
 import type {
   Attachment,
   ConnectionState,
@@ -44,6 +45,7 @@ export class RiviumChatClient {
   private config: NormalizedConfig;
   private apiService: ApiService;
   private realtimeService: RealtimeService;
+  private outbox: Outbox | null = null;
 
   constructor(config: RiviumChatConfig) {
     this.config = normalizeConfig(config);
@@ -56,9 +58,43 @@ export class RiviumChatClient {
       // With a tokenProvider the same user token authenticates REST and the
       // realtime connection; centrifuge asks again before it expires.
       tokens
-        ? () => tokens.get()
+        ? () => this.realtimeToken(tokens)
         : () => this.apiService.getCentrifugoToken(this.config.userId, this.config.userInfo),
     );
+    if (this.config.queueOfflineMessages) {
+      this.outbox = new Outbox({
+        userId: this.config.userId,
+        store: this.config.outboxStore,
+        send: (item) =>
+          this.apiService.sendMessage(item.roomId, item.content, {
+            type: item.type,
+            attachments: item.attachments,
+            replyToId: item.replyToId,
+            metadata: item.metadata,
+            clientMessageId: item.clientMessageId,
+          }),
+        onSent: (event) => this.realtimeService.emit('messageSent', event),
+        onFailed: (event) => this.realtimeService.emit('messageFailed', event),
+      });
+      this.realtimeService.on('connectionState', (event) => {
+        if (event.state === 'connected') void this.outbox?.retryNow();
+      });
+    }
+  }
+
+  /** Whether this client queues messages written without network (`queueOfflineMessages`). */
+  get queueOfflineMessages(): boolean {
+    return this.outbox !== null;
+  }
+
+  /** The user token for the realtime connection; a failing tokenProvider is reported like on REST calls. */
+  private async realtimeToken(tokens: TokenManager): Promise<string> {
+    try {
+      return await tokens.get();
+    } catch (error) {
+      this.realtimeService.emit('authError', { code: 'token_provider_failed', message: 'tokenProvider failed', error });
+      throw error;
+    }
   }
 
   // ─── Event Handling ────────────────────────────────────────────────────
@@ -152,6 +188,18 @@ export class RiviumChatClient {
     return () => this.off('subscriptionState', callback);
   }
 
+  /** A queued message was stored by the Chat API. Returns unsubscribe function. */
+  onMessageSent(callback: EventCallback<'messageSent'>): () => void {
+    this.on('messageSent', callback);
+    return () => this.off('messageSent', callback);
+  }
+
+  /** A queued message left the outbox without being stored. Returns unsubscribe function. */
+  onMessageFailed(callback: EventCallback<'messageFailed'>): () => void {
+    this.on('messageFailed', callback);
+    return () => this.off('messageFailed', callback);
+  }
+
   /** Subscribe to recovery failed events. Returns unsubscribe function. */
   onRecoveryFailed(callback: EventCallback<'recoveryFailed'>): () => void {
     this.on('recoveryFailed', callback);
@@ -170,9 +218,17 @@ export class RiviumChatClient {
     return this.realtimeService.currentConnectionState === 'connected';
   }
 
-  /** Connect to the RiviumChat realtime server. */
-  connect(): void {
-    this.realtimeService.connect();
+  /**
+   * Connect to the RiviumChat realtime server. A failing tokenProvider is
+   * reported on `authError`; await the returned promise to handle a failure
+   * directly.
+   */
+  connect(): Promise<void> {
+    const connecting = this.realtimeService.connect();
+    // Callers written against the void signature never await: keep a failure
+    // from becoming an unhandled rejection.
+    connecting.catch(() => {});
+    return connecting;
   }
 
   /** Disconnect from the RiviumChat realtime server. */
@@ -180,9 +236,14 @@ export class RiviumChatClient {
     this.realtimeService.disconnect();
   }
 
-  /** Clean up resources. */
+  /**
+   * Clean up resources. Messages still waiting in the offline outbox are
+   * forgotten in memory (an `outboxStore` keeps them for the next client of
+   * the same user; `clearPendingMessages()` removes them).
+   */
   dispose(): void {
     this.disconnect();
+    this.outbox?.dispose();
   }
 
   // ─── Room Operations ───────────────────────────────────────────────────
@@ -223,13 +284,17 @@ export class RiviumChatClient {
     options?: {
       externalId?: string;
       metadata?: Record<string, unknown>;
-      participants?: Array<{ userId: string; role?: string }>;
+      participants?: Array<{ userId?: string; externalUserId?: string; role?: string; displayName?: string; locale?: string }>;
     }
   ): Promise<Room> {
     return this.apiService.createRoom(name, options);
   }
 
-  /** Update a room. */
+  /**
+   * Not supported: rooms cannot be changed from the client SDK. Set the name
+   * and metadata when you create the room.
+   * @deprecated Always rejects with a `RiviumChatError`.
+   */
   async updateRoom(
     roomId: string,
     updates: {
@@ -282,7 +347,15 @@ export class RiviumChatClient {
 
   // ─── Message Operations ────────────────────────────────────────────────
 
-  /** Send a message to a room. */
+  /**
+   * Send a message to a room.
+   *
+   * With `queueOfflineMessages`, a message that cannot be sent now (no
+   * network, timeout, 408, 429, 5xx) is queued and returned as pending
+   * (`isPending: true`, `id: "local_<clientMessageId>"`) instead of rejecting;
+   * it is sent when the connection is back (`messageSent` / `messageFailed`).
+   * Attachments are queued as they are (URLs of files you already uploaded).
+   */
   async sendMessage(
     roomId: string,
     content: string,
@@ -293,7 +366,53 @@ export class RiviumChatClient {
       metadata?: Record<string, unknown>;
     }
   ): Promise<Message> {
-    return this.apiService.sendMessage(roomId, content, options);
+    const outbox = this.outbox;
+    if (!outbox) return this.apiService.sendMessage(roomId, content, options);
+
+    const clientMessageId = uuidV4();
+    const pending = pendingMessage(roomId, this.config.userId, content, clientMessageId, options, Date.now());
+    // Messages already waiting for this room go first: queue behind them.
+    if (await outbox.hasPending(roomId)) {
+      await outbox.enqueue(pending);
+      if (this.isConnected) void outbox.flush();
+      return pending;
+    }
+    try {
+      const sent = await this.apiService.sendMessage(roomId, content, { ...options, clientMessageId });
+      return sent && !sent.clientMessageId ? { ...sent, clientMessageId } : sent;
+    } catch (error) {
+      if (!isTransientSendError(error)) throw error;
+      await outbox.enqueue(pending);
+      return pending;
+    }
+  }
+
+  // ─── Offline outbox (queueOfflineMessages) ─────────────────────────────
+
+  /** Messages waiting in the offline outbox, oldest first; only `roomId`'s when given. */
+  async getPendingMessages(roomId?: string): Promise<PendingMessage[]> {
+    return this.outbox ? this.outbox.list(roomId) : [];
+  }
+
+  /** Sends the waiting messages now (instead of waiting for the next retry). */
+  async retryPendingMessages(): Promise<void> {
+    await this.outbox?.retryNow();
+  }
+
+  /**
+   * Removes a waiting message (by its `localId`) from the outbox; emits
+   * nothing. Returns false when it is not waiting (already sent or failed).
+   */
+  async cancelPendingMessage(localId: string): Promise<boolean> {
+    return this.outbox ? this.outbox.cancel(localId) : false;
+  }
+
+  /**
+   * Empties the offline outbox, also its `outboxStore`. Call it on sign-out
+   * when another user may sign in on this device.
+   */
+  async clearPendingMessages(): Promise<void> {
+    await this.outbox?.clear();
   }
 
   /** Get messages for a room with pagination. */
@@ -316,7 +435,7 @@ export class RiviumChatClient {
 
   // ─── Read Status ───────────────────────────────────────────────────────
 
-  /** Mark messages as read up to a certain message. */
+  /** Mark all messages in a room as read. `messageId` is ignored. */
   async markAsRead(roomId: string, messageId?: string): Promise<void> {
     return this.apiService.markAsRead(roomId, messageId);
   }
@@ -378,7 +497,18 @@ export class RiviumChatClient {
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
-  /** Upload a file attachment. */
+  /**
+   * Not supported: Rivium Chat does not store files. Upload the file to your
+   * own storage and send its URL as an attachment:
+   *
+   * ```typescript
+   * await client.sendMessage(roomId, 'photo.jpg', {
+   *   type: 'image',
+   *   attachments: [{ url, mimeType: 'image/jpeg', name: 'photo.jpg', size }],
+   * });
+   * ```
+   * @deprecated Always rejects with a `RiviumChatError`.
+   */
   async uploadFile(roomId: string, file: Blob | File, filename?: string): Promise<UploadResult> {
     return this.apiService.uploadFile(roomId, file, filename);
   }
@@ -390,9 +520,9 @@ export class RiviumChatClient {
     return this.realtimeService.publishTyping(roomId);
   }
 
-  /** Send typing indicator via API (no throttle). */
+  /** Send a typing state via the realtime channel (no throttle). Needs `subscribeToRoom()` first. */
   async sendTypingIndicator(roomId: string, isTyping = true): Promise<void> {
-    return this.apiService.sendTypingIndicator(roomId, isTyping);
+    return this.realtimeService.sendTyping(roomId, isTyping);
   }
 
   // ─── Presence ──────────────────────────────────────────────────────────

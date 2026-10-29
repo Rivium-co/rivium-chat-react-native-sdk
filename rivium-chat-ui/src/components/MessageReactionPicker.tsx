@@ -6,7 +6,6 @@ import {
   StyleSheet,
   Modal,
   Pressable,
-  FlatList,
 } from 'react-native';
 import { useRiviumChatTheme } from '../theme/RiviumChatTheme';
 

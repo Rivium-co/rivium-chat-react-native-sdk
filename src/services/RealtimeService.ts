@@ -19,6 +19,15 @@ import type {
 
 type EventCallback<K extends keyof RiviumChatEventMap> = (event: RiviumChatEventMap[K]) => void;
 
+/**
+ * Unsubscribe codes the client sets itself: 0 = unsubscribe() called,
+ * 2 = client closed. Every other code comes from the server (a refusal or a
+ * server-side unsubscribe).
+ */
+function isClientSideUnsubscribe(code: number | undefined): boolean {
+  return code === undefined || code === 0 || code === 2;
+}
+
 /** Realtime service for RiviumChat using Centrifugo. */
 export class RealtimeService {
   private config: NormalizedConfig;
@@ -42,7 +51,19 @@ export class RealtimeService {
   async connect(): Promise<void> {
     if (this.client) return;
 
-    const token = await this.getToken();
+    let token: string;
+    try {
+      token = await this.getToken();
+    } catch (error) {
+      // No connection without a token (unknown key, token required, API
+      // unreachable, tokenProvider failed): report it like any connection error.
+      this._connectionState = 'error';
+      this.emit('connectionState', {
+        state: 'error',
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      throw error;
+    }
 
     this.client = new Centrifuge(SDK_CONFIG.centrifugoUrl, {
       token,
@@ -66,7 +87,7 @@ export class RealtimeService {
 
     this.client.on('error', (ctx) => {
       this._connectionState = 'error';
-      this.emit('connectionState', { state: 'error', error: ctx.error });
+      this.emit('connectionState', { state: 'error', error: new Error(ctx.error.message) });
     });
 
     this.client.connect();
@@ -136,14 +157,19 @@ export class RealtimeService {
     });
   }
 
-  private lastTypingTime = 0;
+  /** When a typing indicator was last published, per room. */
+  private lastTypingTime = new Map<string, number>();
 
-  /** Publish typing indicator via Centrifugo (throttled to 2 seconds). */
+  /** Publish typing indicator via Centrifugo (throttled to 2 seconds per room). */
   async publishTyping(roomId: string): Promise<void> {
     const now = Date.now();
-    if (now - this.lastTypingTime < 2000) return;
-    this.lastTypingTime = now;
+    if (now - (this.lastTypingTime.get(roomId) ?? 0) < 2000) return;
+    this.lastTypingTime.set(roomId, now);
+    await this.sendTyping(roomId, true);
+  }
 
+  /** Publish a typing state via Centrifugo, without throttling. Needs `subscribeToRoom()` first. */
+  async sendTyping(roomId: string, isTyping: boolean): Promise<void> {
     const channel = `typing:room_${roomId}`;
     const sub = this.subscriptions.get(channel);
     if (!sub) return;
@@ -151,7 +177,7 @@ export class RealtimeService {
     try {
       await sub.publish({
         userId: this.config.userId,
-        isTyping: true,
+        isTyping,
       });
     } catch (_) {
       // Ignore typing publish errors
@@ -203,11 +229,30 @@ export class RealtimeService {
     }
   }
 
+  /** Forgets a subscription the server ended, so the next subscribe builds a fresh one. */
+  private dropSubscription(channel: string, sub: Subscription): void {
+    if (this.subscriptions.get(channel) !== sub) return;
+    sub.removeAllListeners();
+    this.client?.removeSubscription(sub);
+    this.subscriptions.delete(channel);
+  }
+
+  /** Drops the subscription when the server refuses or ends it. */
+  private dropWhenRefused(channel: string, sub: Subscription): void {
+    sub.on('unsubscribed', (ctx: any) => {
+      if (ctx && !isClientSideUnsubscribe(ctx.code)) this.dropSubscription(channel, sub);
+    });
+  }
+
   private subscribeToChatChannel(roomId: string): void {
     const channel = `chat:room_${roomId}`;
     if (this.subscriptions.has(channel)) return;
 
-    const sub = this.client!.newSubscription(channel);
+    // Recoverable, so messages missed during a short disconnect are
+    // replayed; when they cannot be, `recoveryFailed` tells the app to reload.
+    const sub = this.client!.newSubscription(channel, {
+      recoverable: true,
+    });
 
     sub.on('subscribing', () => {
       this.emit('subscriptionState', {
@@ -216,18 +261,39 @@ export class RealtimeService {
       } as SubscriptionStateEvent);
     });
 
-    sub.on('subscribed', () => {
+    sub.on('subscribed', (ctx) => {
       this.emit('subscriptionState', {
         channel,
         state: 'subscribed',
       } as SubscriptionStateEvent);
+
+      // Check for recovery failure
+      if (ctx.wasRecovering && !ctx.recovered) {
+        this.emit('recoveryFailed', { roomId } as RecoveryFailedEvent);
+      }
     });
 
-    sub.on('unsubscribed', () => {
+    sub.on('unsubscribed', (ctx: any) => {
       this.emit('subscriptionState', {
         channel,
+        roomId,
         state: 'unsubscribed',
+        code: ctx?.code,
+        reason: ctx?.reason,
       } as SubscriptionStateEvent);
+
+      // The server refused or ended the subscription (for example: not a
+      // participant of the room). The room is not followed any more: drop the
+      // dead subscription so a later subscribeToRoom() tries again, and tell
+      // the app, which should reload the room or show the refusal.
+      if (ctx && !isClientSideUnsubscribe(ctx.code)) {
+        this.dropSubscription(channel, sub);
+        this.emit('recoveryFailed', {
+          roomId,
+          code: ctx.code,
+          reason: ctx.reason,
+        } as RecoveryFailedEvent);
+      }
     });
 
     sub.on('error', () => {
@@ -253,6 +319,7 @@ export class RealtimeService {
     sub.on('publication', (ctx) => {
       this.handleTypingPublication(roomId, ctx.data);
     });
+    this.dropWhenRefused(channel, sub);
 
     sub.subscribe();
     this.subscriptions.set(channel, sub);
@@ -265,6 +332,8 @@ export class RealtimeService {
     const sub = this.client!.newSubscription(channel, {
       joinLeave: true,
     });
+
+    this.dropWhenRefused(channel, sub);
 
     sub.on('join', (ctx: any) => {
       this.emit('presence', {
@@ -323,6 +392,7 @@ export class RealtimeService {
         } as ReadReceiptEvent);
         break;
 
+      case 'deleted':
       case 'message_deleted':
         this.emit('messageDeleted', {
           messageId: eventData.messageId as string,

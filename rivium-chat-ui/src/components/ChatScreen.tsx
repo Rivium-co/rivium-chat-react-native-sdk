@@ -1,4 +1,4 @@
-import React, { useRef, useCallback, useState } from 'react';
+import React, { useRef, useCallback, useMemo, useState } from 'react';
 import {
   View,
   FlatList,
@@ -16,6 +16,7 @@ import { ChatInputField } from './ChatInputField';
 import { TypingIndicator } from './TypingIndicator';
 import { MessageContextMenu, createMessageActions } from './MessageContextMenu';
 import { MessageReactionPicker } from './MessageReactionPicker';
+import { ChatAttachmentPicker, type AttachmentOption, type SelectedAttachment } from './ChatAttachmentPicker';
 
 export interface FileUploader {
   uploadFile(uri: string, mimeType?: string, fileName?: string): Promise<Attachment | null>;
@@ -30,14 +31,33 @@ export interface ChatScreenProps {
   onImagePress?: (url: string) => void;
   userDisplayNames?: Record<string, string>;
   placeholder?: string;
+  /** Show "… is typing" above the input. Default: true. */
   showTypingIndicator?: boolean;
+  /** Show when the other person has read your messages (✓✓). Default: true. */
   showReadReceipts?: boolean;
   enableReactions?: boolean;
   enableReplies?: boolean;
+  /** Show the attachment button (needs `fileUploader`). Default: true. */
   enableAttachments?: boolean;
+  /**
+   * The sources in the attachment sheet. Each option's `onPress` receives
+   * `addAttachments`: pass it the files your picker returned.
+   */
+  attachmentOptions?: AttachmentOption[];
+  /** Largest file the attachment sheet accepts, in bytes. Default: 25 MB. */
+  maxFileSize?: number;
+  /** MIME types the attachment sheet accepts, for example `['image/*', 'application/pdf']`. Default: all. */
+  allowedTypes?: string[];
   enablePinning?: boolean;
-  onSendMessage?: (content: string) => void;
+  /**
+   * Called when the user sends a text message, before the kit sends it.
+   * Return `false` (or a promise of `false`) to send it yourself, or not at
+   * all; return nothing to let the kit send it as usual.
+   */
+  onSendMessage?: (content: string) => void | boolean | Promise<void | boolean>;
+  /** Title shown in a room with no messages. Default: "No messages yet". */
   emptyStateTitle?: string;
+  /** Second line shown in a room with no messages. */
   emptyStateSubtitle?: string;
 }
 
@@ -48,13 +68,27 @@ export function ChatScreen({
   messageBuilder,
   fileUploader,
   onImagePress,
-  userDisplayNames = {},
+  userDisplayNames: userDisplayNamesProp,
   placeholder,
   enableReactions = true,
   enableReplies = true,
   enablePinning = false,
+  enableAttachments = true,
+  showTypingIndicator = true,
+  showReadReceipts = true,
+  onSendMessage,
+  emptyStateTitle = 'No messages yet',
+  emptyStateSubtitle,
+  attachmentOptions,
+  maxFileSize,
+  allowedTypes,
 }: ChatScreenProps) {
   const state = useChatChannel(roomId, currentUserId);
+  // Names from the room's participants; names passed in by the app win.
+  const userDisplayNames = useMemo(
+    () => ({ ...state.displayNames, ...userDisplayNamesProp }),
+    [state.displayNames, userDisplayNamesProp]
+  );
   const client = useRiviumChatClient();
   const flatListRef = useRef<FlatList>(null);
   const { colors } = useRiviumChatTheme();
@@ -63,6 +97,31 @@ export function ChatScreen({
   const [showReactionPicker, setShowReactionPicker] = useState(false);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [showAttachmentPicker, setShowAttachmentPicker] = useState(false);
+
+  // Upload the picked files with the app's fileUploader, then send each one.
+  const handleAttachmentsSelected = useCallback(
+    async (selected: SelectedAttachment[]) => {
+      if (!fileUploader || selected.length === 0) return;
+      setIsUploading(true);
+      try {
+        for (const item of selected) {
+          try {
+            const attachment = await fileUploader.uploadFile(item.uri, item.mimeType, item.name);
+            if (attachment) {
+              const isImage = (item.mimeType ?? '').startsWith('image/');
+              await state.sendMessage(isImage ? '📷 Image' : `📎 ${item.name}`, [attachment]);
+            }
+          } catch {
+            // A failed upload skips that file; the others still go out.
+          }
+        }
+      } finally {
+        setIsUploading(false);
+      }
+    },
+    [fileUploader, state]
+  );
 
   // Mark messages as read when screen mounts and when new messages arrive
   React.useEffect(() => {
@@ -79,13 +138,13 @@ export function ChatScreen({
 
   const isMessageRead = useCallback(
     (message: Message) => {
-      if (message.senderUserId !== currentUserId || !state.otherUserLastRead) {
+      if (!showReadReceipts || message.senderUserId !== currentUserId || !state.otherUserLastRead) {
         return false;
       }
       const messageDate = new Date(message.createdAt);
       return messageDate <= state.otherUserLastRead;
     },
-    [currentUserId, state.otherUserLastRead]
+    [currentUserId, state.otherUserLastRead, showReadReceipts]
   );
 
   // Long press on message -> show context menu
@@ -209,14 +268,14 @@ export function ChatScreen({
   );
 
   const renderHeader = useCallback(() => {
-    if (state.typingUsers.length === 0) return null;
+    if (!showTypingIndicator || state.typingUsers.length === 0) return null;
     return (
       <TypingIndicator
         typingUsers={state.typingUsers}
         userDisplayNames={userDisplayNames}
       />
     );
-  }, [state.typingUsers, userDisplayNames]);
+  }, [state.typingUsers, userDisplayNames, showTypingIndicator]);
 
   const renderFooter = useCallback(() => {
     if (!state.isLoadingMore) return null;
@@ -252,11 +311,33 @@ export function ChatScreen({
     return (
       <View style={[styles.centered, styles.invertedFix]}>
         <Text style={[styles.emptyText, { color: colors.timestampText }]}>
-          No messages yet
+          {emptyStateTitle}
         </Text>
+        {emptyStateSubtitle ? (
+          <Text style={[styles.emptySubtitle, { color: colors.timestampText }]}>
+            {emptyStateSubtitle}
+          </Text>
+        ) : null}
       </View>
     );
-  }, [state.isInitialLoading, state.error, colors]);
+  }, [state.isInitialLoading, state.error, colors, emptyStateTitle, emptyStateSubtitle]);
+
+  // Lets the app see (or take over) each text message before the kit sends it.
+  const handleSendMessage = useCallback(
+    async (content: string) => {
+      if (onSendMessage) {
+        let result: void | boolean;
+        try {
+          result = await onSendMessage(content);
+        } catch {
+          return; // the app's handler failed: do not send behind its back
+        }
+        if (result === false) return;
+      }
+      await state.sendMessage(content);
+    },
+    [onSendMessage, state]
+  );
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -279,21 +360,38 @@ export function ChatScreen({
         keyboardShouldPersistTaps="handled"
       />
 
+      {isUploading && (
+        <View style={styles.uploadingRow}>
+          <ActivityIndicator size="small" color={colors.linkText} />
+          <Text style={[styles.uploadingText, { color: colors.timestampText }]}>Uploading...</Text>
+        </View>
+      )}
+
+      {!readOnly && fileUploader && enableAttachments && (
+        <ChatAttachmentPicker
+          visible={showAttachmentPicker}
+          onClose={() => setShowAttachmentPicker(false)}
+          onAttachmentsSelected={handleAttachmentsSelected}
+          options={attachmentOptions}
+          maxFileSize={maxFileSize}
+          allowedTypes={allowedTypes}
+        />
+      )}
+
       {!readOnly && (
         <ChatInputField
-          onSendMessage={(content) => state.sendMessage(content)}
+          onSendMessage={(content) => { handleSendMessage(content); }}
           onTyping={() => state.publishTyping()}
           replyingTo={state.replyingTo}
           onCancelReply={() => state.setReplyingTo(null)}
+          userDisplayNames={userDisplayNames}
           editingMessage={editingMessage}
           onCancelEdit={() => setEditingMessage(null)}
           onEditMessage={(messageId, content) => {
             state.editMessage(messageId, content);
             setEditingMessage(null);
           }}
-          onAttachmentPress={fileUploader ? () => {
-            // Attachment picker would be triggered here
-          } : undefined}
+          onAttachmentPress={fileUploader && enableAttachments ? () => setShowAttachmentPicker(true) : undefined}
           disabled={state.isInitialLoading || isUploading}
           placeholder={placeholder}
         />
@@ -340,6 +438,16 @@ export function ChatScreen({
 }
 
 const styles = StyleSheet.create({
+  uploadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+  },
+  uploadingText: {
+    fontSize: 12,
+    marginLeft: 8,
+  },
   container: {
     flex: 1,
   },
@@ -373,6 +481,11 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 16,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    marginTop: 4,
+    textAlign: 'center',
   },
 });
 

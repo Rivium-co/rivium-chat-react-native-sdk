@@ -136,6 +136,8 @@ export {
   VoiceMessagePlayer,
   type VoiceMessageRecorderProps,
   type VoiceMessagePlayerProps,
+  type VoiceAudioPlayer,
+  type VoiceAudioRecorder,
 } from './components/VoiceMessageRecorder';
 
 export {
