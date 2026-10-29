@@ -28,7 +28,7 @@ function isClientSideUnsubscribe(code: number | undefined): boolean {
   return code === undefined || code === 0 || code === 2;
 }
 
-/** Realtime service for RiviumChat using Centrifugo. */
+/** Realtime service for RiviumChat. */
 export class RealtimeService {
   private config: NormalizedConfig;
   private getToken: () => Promise<string>;
@@ -47,7 +47,7 @@ export class RealtimeService {
     this.getToken = getToken;
   }
 
-  /** Connect to the Centrifugo server. */
+  /** Connect to the realtime server. */
   async connect(): Promise<void> {
     if (this.client) return;
 
@@ -65,7 +65,7 @@ export class RealtimeService {
       throw error;
     }
 
-    this.client = new Centrifuge(SDK_CONFIG.centrifugoUrl, {
+    this.client = new Centrifuge(SDK_CONFIG.realtimeUrl, {
       token,
       getToken: () => this.getToken(),
     });
@@ -93,7 +93,7 @@ export class RealtimeService {
     this.client.connect();
   }
 
-  /** Disconnect from the Centrifugo server. */
+  /** Disconnect from the realtime server. */
   disconnect(): void {
     this.subscriptions.forEach((sub) => sub.unsubscribe());
     this.subscriptions.clear();
@@ -160,7 +160,7 @@ export class RealtimeService {
   /** When a typing indicator was last published, per room. */
   private lastTypingTime = new Map<string, number>();
 
-  /** Publish typing indicator via Centrifugo (throttled to 2 seconds per room). */
+  /** Publish typing indicator over the realtime connection (throttled to 2 seconds per room). */
   async publishTyping(roomId: string): Promise<void> {
     const now = Date.now();
     if (now - (this.lastTypingTime.get(roomId) ?? 0) < 2000) return;
@@ -168,7 +168,7 @@ export class RealtimeService {
     await this.sendTyping(roomId, true);
   }
 
-  /** Publish a typing state via Centrifugo, without throttling. Needs `subscribeToRoom()` first. */
+  /** Publish a typing state over the realtime connection, without throttling. Needs `subscribeToRoom()` first. */
   async sendTyping(roomId: string, isTyping: boolean): Promise<void> {
     const channel = `typing:room_${roomId}`;
     const sub = this.subscriptions.get(channel);
@@ -184,7 +184,7 @@ export class RealtimeService {
     }
   }
 
-  /** Get currently online users in a room via Centrifugo presence. */
+  /** Get currently online users in a room via realtime presence. */
   async getRoomPresence(roomId: string): Promise<Set<string>> {
     const channel = `presence:room_${roomId}`;
     const sub = this.subscriptions.get(channel);

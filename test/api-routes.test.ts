@@ -97,7 +97,7 @@ describe('routes and bodies match the API', () => {
   });
 });
 
-/** Minimal stand-in for a centrifuge Subscription. */
+/** Minimal stand-in for a realtime client subscription. */
 function fakeSub() {
   const handlers: Record<string, Array<(ctx: any) => void>> = {};
   return {

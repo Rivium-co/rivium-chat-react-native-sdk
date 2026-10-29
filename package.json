@@ -26,7 +26,6 @@
     "messaging",
     "sdk",
     "rivium-chat",
-    "centrifugo",
     "realtime"
   ],
   "repository": {

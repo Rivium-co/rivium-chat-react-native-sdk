@@ -2,7 +2,9 @@
 export const SDK_CONFIG = {
   /** Base URL for the RiviumChat API */
   baseUrl: 'https://chat.rivium.co',
-  /** WebSocket URL for Centrifugo realtime server */
+  /** WebSocket URL for the realtime server */
+  realtimeUrl: 'wss://ws-chat.rivium.co/connection/websocket',
+  /** @deprecated Use `realtimeUrl`. */
   centrifugoUrl: 'wss://ws-chat.rivium.co/connection/websocket',
 } as const;
 
